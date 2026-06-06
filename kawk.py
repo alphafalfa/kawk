@@ -39,6 +39,15 @@ def lex(src):
         elif c == '}': toks.append(('rbrace', '}')); i += 1
         elif c == '?': toks.append(('q', '?')); i += 1
         elif c == ':': toks.append(('colon', ':')); i += 1
+        elif c == '"':                                   # string literal
+            j = i+1; buf = ''
+            while j < len(src) and src[j] != '"':
+                if src[j] == '\\' and j+1 < len(src):
+                    buf += src[j:j+2]; j += 2            # keep escapes verbatim (AWK shares them)
+                else:
+                    buf += src[j]; j += 1
+            if j >= len(src): raise SyntaxError("unterminated string")
+            toks.append(('str', buf)); i = j+1
         elif 'a' <= c <= 'z': toks.append(('var', c)); i += 1   # lowercase = a variable
         elif c in VERBS: toks.append(('verb', c)); i += 1
         elif c in ADVERBS: toks.append(('adv', c)); i += 1
@@ -107,6 +116,13 @@ def parse(atoms):
 
 def verb_expr(atoms):
     a = atoms[0]
+    # while:  {cond}{step}\seed  -> trajectory (scan)   /   {cond}{step}/seed -> final (over)
+    if a[0] == 'lam' and len(atoms) >= 2 and atoms[1][0] == 'adverbed':
+        adv = atoms[1][1]; step_lam = atoms[1][2]
+        cond = parse(a[1]); step = parse(step_lam[1]); seed = verb_expr(atoms[2:])
+        if adv == '\\': return ('whilescan', cond, step, seed)
+        if adv == '/':  return ('whileover', cond, step, seed)
+        raise SyntaxError(f"adverb {adv!r} after a condition not in spike")
     if a[0] == 'adverbed':                       # a function carrying an adverb
         adv, inner = a[1], a[2]
         body = parse(inner[1])                   # the lambda/group body, as a tree
@@ -119,7 +135,7 @@ def verb_expr(atoms):
         v = atoms[1]
         if v[0] != 'verb2': raise SyntaxError("expected verb after group")
         return ('dyad', v, sub, verb_expr(atoms[2:]))
-    if a[0] in ('field', 'int', 'var'):
+    if a[0] in ('field', 'int', 'var', 'str'):
         if len(atoms) == 1: return ('noun', a)
         v = atoms[1]
         if v[0] != 'verb2': raise SyntaxError("two nouns in a row")
@@ -134,7 +150,10 @@ class NotInline(Exception): pass
 def inline(node):
     t = node[0]
     if t == 'noun':
-        a = node[1]; return f"${a[1]}" if a[0]=='field' else a[1]
+        a = node[1]
+        if a[0] == 'field': return f"${a[1]}"
+        if a[0] == 'str':   return '"' + a[1] + '"'
+        return a[1]                                # int or var
     if t == 'tern':
         return f"({inline(node[1])}?{inline(node[2])}:{inline(node[3])})"
     if t == 'assign':
@@ -158,7 +177,10 @@ class Emit:
         typ = node[0]
         if typ=='noun':
             a=node[1]; t=self.tmp()
-            self.lines.append(f"{t}={'$'+a[1] if a[0]=='field' else a[1]}")
+            if a[0]=='field': val='$'+a[1]
+            elif a[0]=='str': val='"'+a[1]+'"'
+            else: val=a[1]
+            self.lines.append(f"{t}={val}")
             return (t, False)
         if typ=='monad':
             sym, adv = node[1][1], node[1][2]
@@ -168,10 +190,21 @@ class Emit:
                 t=self.tmp(); self.lines.append(f"for(_i=0;_i<{name};_i++){t}[_i+1]=_i"); return (t,True)
             if sym=='|': return self.reverse(name, vec)
             if sym=='#':
-                t=self.tmp(); self.lines.append(f"{t}=length({name})"); return (t,False)
+                t=self.tmp()
+                if vec: self.lines.append(f"{t}=0;for(_k in {name}){t}++")   # count, portable
+                else:   self.lines.append(f"{t}=length({name})")
+                return (t,False)
             raise SyntaxError(f"monadic {sym!r} not in spike")
         if typ=='dyad':
             ln,lv=self.go(node[2]); rn,rv=self.go(node[3]); return self.arith(node[1][1],ln,lv,rn,rv)
+        if typ=='whilescan':                               # {cond}{step}\seed -> trajectory
+            sn,_=self.go(node[3]); c=inline(node[1]); s=inline(node[2]); t=self.tmp()
+            self.lines.append(f"x={sn};_j=1;{t}[1]=x;while({c}){{x=({s});_j++;{t}[_j]=x}}")
+            return (t, True)
+        if typ=='whileover':                               # {cond}{step}/seed -> final value
+            sn,_=self.go(node[3]); c=inline(node[1]); s=inline(node[2]); t=self.tmp()
+            self.lines.append(f"x={sn};while({c})x=({s});{t}=x")
+            return (t, False)
         if typ=='each':                                    # {body}'vec  -> map, binding x
             lam, vec = node[1], node[2]
             vn, vv = self.go(vec)
@@ -227,8 +260,7 @@ def transpile(src):
     except NotInline:
         e=Emit(); name,vec=e.go(tree); body=";".join(e.lines)
         if vec:
-            j=(f'_o="";for(_k=1;_k in {name};_k++)_o=_o(_k>1?" ":""){name}[_k];print _o')
-            return "{"+body+";"+j+"}"
+            return "{"+body+f";for(_k=1;_k in {name};_k++)print {name}[_k]}}"
         return "{"+body+";print "+name+"}"
 
 def main():
