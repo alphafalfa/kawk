@@ -108,4 +108,4 @@ while (`\` `/`).
 
 ## License
 
-_Your call._
+GPL 3.0
