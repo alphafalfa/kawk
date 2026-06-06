@@ -1,34 +1,39 @@
 #!/bin/sh
-# kawk -- run a .kk program.
-#   ./kawk prog.kk [data ...]      transpile prog.kk, run it on data files (or stdin)
-#   ./kawk -d prog.kk [data ...]   same, but also dump the generated AWK to stderr
+# kawk -- run a .kk program through the kawk interpreter.
+#   ./kawk prog.kk [data ...]          run prog.kk on data files (or stdin)
+#   ./kawk -F, prog.kk [data ...]      set the field separator
+#   ./kawk -d prog.kk [data ...]       also dump the (retired) AWK to stderr
 #
-# How it works: kawk.py decodes the .kk source into AWK; this script hands that
-# to awk via exec, so stdin, file args, and exit status all pass straight through.
+# Trailing args that are real files are read as input; anything else is treated
+# as literal input lines, so `./kawk sum.kk 5` works without a here-string.
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
-debug=0
-[ "$1" = "-d" ] && { debug=1; shift; }
+debug=0; fsopt=""
+while :; do
+    case "$1" in
+        -d)  debug=1; shift ;;
+        -F)  fsopt="-F $2"; shift 2 ;;
+        -F*) fsopt="-F ${1#-F}"; shift ;;
+        *)   break ;;
+    esac
+done
 
-[ -n "$1" ] || { echo "usage: kawk [-d] prog[.kk] [data ...]" >&2; exit 2; }
+[ -n "$1" ] || { echo "usage: kawk [-d] [-F sep] prog[.kk] [data ...]" >&2; exit 2; }
 prog=$1; shift
 
-# accept either 'sum' or 'sum.kk'
 if   [ -f "$prog" ];    then :
 elif [ -f "$prog.kk" ]; then prog="$prog.kk"
 else echo "kawk: no such program: $prog (looked for '$prog' and '$prog.kk')" >&2; exit 1
 fi
 
-# python is the pure transpiler: .kk in, AWK out (errors go to stderr and abort)
-src=$(python3 "$here/kawk.py" "$prog") || exit 1
+[ "$debug" = 1 ] && {
+    awk=$(python3 "$here/kawk.py" --emit-awk "$prog" 2>&1)
+    printf '%s\n' '--- would-be awk (retired backend) ---' "$awk" '--------------------------------------' >&2
+}
 
-[ "$debug" = 1 ] && printf '%s\n' '--- generated awk ---' "$src" '---------------------' >&2
-
-# Trailing args: a real file is read as a file (FILENAME/FNR work); anything else is
-# treated as literal input lines, so `./kawk sum.kk 5` works without a here-string.
 if [ "$#" -gt 0 ] && [ ! -f "$1" ]; then
-    printf '%s\n' "$@" | awk "$src"
+    printf '%s\n' "$@" | python3 "$here/kawk.py" $fsopt "$prog"
 else
-    exec awk "$src" "$@"          # named files, or stdin if none given
+    cat -- "$@" | python3 "$here/kawk.py" $fsopt "$prog"
 fi
