@@ -1,0 +1,23 @@
+#!/bin/sh
+# kawk -- run a .kk program.
+#   ./kawk prog.kk [data ...]      transpile prog.kk, run it on data files (or stdin)
+#   ./kawk -d prog.kk [data ...]   same, but also dump the generated AWK to stderr
+#
+# How it works: kawk.py decodes the .kk source into AWK; this script hands that
+# to awk via exec, so stdin, file args, and exit status all pass straight through.
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+debug=0
+[ "$1" = "-d" ] && { debug=1; shift; }
+
+[ -n "$1" ] || { echo "usage: kawk [-d] prog.kk [data ...]" >&2; exit 2; }
+prog=$1; shift
+
+# python is the pure transpiler: .kk in, AWK out (errors go to stderr and abort)
+src=$(python3 "$here/kawk.py" "$prog") || exit 1
+
+[ "$debug" = 1 ] && printf '%s\n' '--- generated awk ---' "$src" '---------------------' >&2
+
+# awk does the heavy lifting; exec lets data/pipes/exit code flow through untouched
+exec awk "$src" "$@"

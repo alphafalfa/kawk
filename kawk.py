@@ -12,7 +12,7 @@ Slab 2: the scalar layer on top of the expression core.
   - bare expr = a pattern (prints $0 if truthy = a filter)
 Still TODO: strings, for/while loops, functions, pattern-action chains.
 """
-import sys, subprocess
+import sys, subprocess, os
 
 VERBS   = set("+-*%|!#<>=&")     # / handled specially (divide vs fold)
 ADVERBS = set("/\\'")
@@ -263,10 +263,16 @@ def transpile(src):
             return "{"+body+f";for(_k=1;_k in {name};_k++)print {name}[_k]}}"
         return "{"+body+";print "+name+"}"
 
+def read_source(arg):
+    if arg == "-":            return sys.stdin.read()   # program piped in
+    if os.path.exists(arg):   return open(arg).read()   # a .kk file
+    return arg                                          # a literal program string
+
 def main():
     args=sys.argv[1:]; run=False
     if args and args[0]=="-r": run=True; args=args[1:]
-    awk=transpile(args[0])
+    if not args: sys.exit("usage: kawk.py [-r] <prog.kk | - | 'program'>")
+    awk=transpile(read_source(args[0]).strip())
     if run: subprocess.run(["awk", awk], input=sys.stdin.read(), text=True)
     else: print(awk)
 
