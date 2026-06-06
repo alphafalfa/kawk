@@ -264,15 +264,20 @@ def transpile(src):
         return "{"+body+";print "+name+"}"
 
 def read_source(arg):
-    if arg == "-":            return sys.stdin.read()   # program piped in
-    if os.path.exists(arg):   return open(arg).read()   # a .kk file
-    return arg                                          # a literal program string
+    if arg == "-":          return sys.stdin.read()
+    if os.path.isfile(arg): return open(arg).read()
+    sys.exit(f"kawk.py: no such file: {arg!r}  (use -e '<program>' for a literal, - for stdin)")
 
 def main():
     args=sys.argv[1:]; run=False
     if args and args[0]=="-r": run=True; args=args[1:]
-    if not args: sys.exit("usage: kawk.py [-r] <prog.kk | - | 'program'>")
-    awk=transpile(read_source(args[0]).strip())
+    if not args: sys.exit("usage: kawk.py [-r] [-e '<program>' | <file.kk> | -]")
+    if args[0]=="-e":
+        if len(args)<2: sys.exit("kawk.py: -e needs a program string")
+        src=args[1]
+    else:
+        src=read_source(args[0])
+    awk=transpile(src.strip())
     if run: subprocess.run(["awk", awk], input=sys.stdin.read(), text=True)
     else: print(awk)
 

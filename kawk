@@ -11,13 +11,24 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 debug=0
 [ "$1" = "-d" ] && { debug=1; shift; }
 
-[ -n "$1" ] || { echo "usage: kawk [-d] prog.kk [data ...]" >&2; exit 2; }
+[ -n "$1" ] || { echo "usage: kawk [-d] prog[.kk] [data ...]" >&2; exit 2; }
 prog=$1; shift
+
+# accept either 'sum' or 'sum.kk'
+if   [ -f "$prog" ];    then :
+elif [ -f "$prog.kk" ]; then prog="$prog.kk"
+else echo "kawk: no such program: $prog (looked for '$prog' and '$prog.kk')" >&2; exit 1
+fi
 
 # python is the pure transpiler: .kk in, AWK out (errors go to stderr and abort)
 src=$(python3 "$here/kawk.py" "$prog") || exit 1
 
 [ "$debug" = 1 ] && printf '%s\n' '--- generated awk ---' "$src" '---------------------' >&2
 
-# awk does the heavy lifting; exec lets data/pipes/exit code flow through untouched
-exec awk "$src" "$@"
+# Trailing args: a real file is read as a file (FILENAME/FNR work); anything else is
+# treated as literal input lines, so `./kawk sum.kk 5` works without a here-string.
+if [ "$#" -gt 0 ] && [ ! -f "$1" ]; then
+    printf '%s\n' "$@" | awk "$src"
+else
+    exec awk "$src" "$@"          # named files, or stdin if none given
+fi
