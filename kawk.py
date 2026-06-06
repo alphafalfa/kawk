@@ -35,50 +35,53 @@ def lex(src):
             toks.append(('int', src[i:j])); i = j
         elif c == '(': toks.append(('lp', '(')); i += 1
         elif c == ')': toks.append(('rp', ')')); i += 1
+        elif c == '{': toks.append(('lbrace', '{')); i += 1
+        elif c == '}': toks.append(('rbrace', '}')); i += 1
         elif c == '?': toks.append(('q', '?')); i += 1
         elif c == ':': toks.append(('colon', ':')); i += 1
+        elif 'a' <= c <= 'z': toks.append(('var', c)); i += 1   # lowercase = a variable
         elif c in VERBS: toks.append(('verb', c)); i += 1
         elif c in ADVERBS: toks.append(('adv', c)); i += 1
         else: raise SyntaxError(f"unknown glyph {c!r}")
     return toks
 
-# ---------- fold-merge: adverb glues to verb on its left ----------
-def fold_adverbs(toks):
-    out, i = [], 0
-    while i < len(toks):
-        k, v = toks[i]
-        if k == 'adv':
-            if v == '/': out.append(('verb2', '/', None))      # bare / = divide
-            else: raise SyntaxError(f"adverb {v!r} needs a verb on its left")
-            i += 1
-        elif k == 'verb':
-            adv = None
-            if i+1 < len(toks) and toks[i+1][0] == 'adv':
-                adv = toks[i+1][1]; i += 1
-            out.append(('verb2', v, adv)); i += 1
+# ---------- fold-merge: an adverb glues to the verb/lambda on its LEFT ----------
+def fold_adverbs(atoms):
+    out = []
+    for a in atoms:
+        if a[0] in ('group', 'lam'):
+            out.append((a[0], fold_adverbs(a[1])))            # recurse into bodies
+        elif a[0] == 'verb':
+            out.append(('verb2', a[1], None))
+        elif a[0] == 'adv':
+            prev = out[-1] if out else None
+            if prev and prev[0] == 'verb2' and prev[2] is None:
+                out[-1] = ('verb2', prev[1], a[1])            # +/  */  f'   (adverb on verb)
+            elif prev and prev[0] in ('group', 'lam'):
+                out[-1] = ('adverbed', a[1], prev)            # each/over a function
+            elif a[1] == '/':
+                out.append(('verb2', '/', None))              # bare / with no verb = divide
+            else:
+                raise SyntaxError(f"adverb {a[1]!r} needs a verb or function on its left")
         else:
-            out.append((k, v)); i += 1
+            out.append(a)
     return out
 
-# ---------- group parens into nested atoms ----------
+# ---------- group parens (group) and braces (lambda) into nested atoms ----------
 def group(toks):
-    def rec(it):
-        atoms = []
-        for t in it:
-            atoms.append(t)
-        return atoms
     out, stack = [], []
     cur = out
     for t in toks:
         if t[0] == 'lp':
-            new = []
-            stack.append(cur); cur.append(('group', new)); cur = new
-        elif t[0] == 'rp':
-            if not stack: raise SyntaxError("unbalanced )")
+            new = []; stack.append(cur); cur.append(('group', new)); cur = new
+        elif t[0] == 'lbrace':
+            new = []; stack.append(cur); cur.append(('lam', new)); cur = new
+        elif t[0] in ('rp', 'rbrace'):
+            if not stack: raise SyntaxError("unbalanced close")
             cur = stack.pop()
         else:
             cur.append(t)
-    if stack: raise SyntaxError("unbalanced (")
+    if stack: raise SyntaxError("unbalanced open")
     return out
 
 # ---------- parse: ternary > assignment > verb-expr ----------
@@ -104,13 +107,19 @@ def parse(atoms):
 
 def verb_expr(atoms):
     a = atoms[0]
+    if a[0] == 'adverbed':                       # a function carrying an adverb
+        adv, inner = a[1], a[2]
+        body = parse(inner[1])                   # the lambda/group body, as a tree
+        if adv == "'":
+            return ('each', body, verb_expr(atoms[1:]))   # map body over the vector at right
+        raise SyntaxError(f"adverb {adv!r} on a function not in spike")
     if a[0] == 'group':
         sub = parse(a[1])
         if len(atoms) == 1: return sub
         v = atoms[1]
         if v[0] != 'verb2': raise SyntaxError("expected verb after group")
         return ('dyad', v, sub, verb_expr(atoms[2:]))
-    if a[0] in ('field','int'):
+    if a[0] in ('field', 'int', 'var'):
         if len(atoms) == 1: return ('noun', a)
         v = atoms[1]
         if v[0] != 'verb2': raise SyntaxError("two nouns in a row")
@@ -163,6 +172,14 @@ class Emit:
             raise SyntaxError(f"monadic {sym!r} not in spike")
         if typ=='dyad':
             ln,lv=self.go(node[2]); rn,rv=self.go(node[3]); return self.arith(node[1][1],ln,lv,rn,rv)
+        if typ=='each':                                    # {body}'vec  -> map, binding x
+            lam, vec = node[1], node[2]
+            vn, vv = self.go(vec)
+            if not vv: raise SyntaxError("each needs a vector on its right")
+            expr = inline(lam)                             # body as an expression in x
+            t = self.tmp()
+            self.lines.append(f"for(_k in {vn}){{x={vn}[_k];{t}[_k]=({expr})}}")
+            return (t, True)
         if typ in ('tern','assign'):
             # scalar control forms: reuse inline
             t=self.tmp(); self.lines.append(f"{t}={inline(node)}"); return (t,False)
@@ -186,7 +203,7 @@ class Emit:
         self.lines.append(f"for(_k in {ln}){t}[_k]={ln}[_k]{op}({rn})"); return (t,True)
 
 def transpile(src):
-    tree = parse(group(fold_adverbs(lex(src))))
+    tree = parse(fold_adverbs(group(lex(src))))
     # assignment to $0 -> print the value (the auto-print idiom)
     if tree[0]=='assign':
         lv=tree[1]; is_f0 = len(lv)==1 and lv[0][0]=='field' and lv[0][1]=='0'
