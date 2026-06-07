@@ -3,11 +3,18 @@
 #   ./kawk prog.kk [data ...]          run prog.kk on data files (or stdin)
 #   ./kawk -F, prog.kk [data ...]      set the field separator
 #   ./kawk -d prog.kk [data ...]       also dump the (retired) AWK to stderr
+#   ./kawk -h [SYM]                    glyph reference (one glyph if SYM given)
+#   ./kawk --explain 'PROG'            show how the program grouped (right-to-left)
 #
 # Trailing args that are real files are read as input; anything else is treated
 # as literal input lines, so `./kawk sum.kk 5` works without a here-string.
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+case "$1" in
+    -h|--help|help) exec python3 "$here/kawk.py" -h "$2" ;;
+    --explain)      shift; exec python3 "$here/kawk.py" --explain "$@" ;;
+esac
 
 debug=0; fsopt=""
 while :; do

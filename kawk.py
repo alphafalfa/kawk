@@ -14,11 +14,11 @@ Still TODO: strings, for/while loops, functions, pattern-action chains.
 """
 import sys, subprocess, os, re, math
 
-VERBS   = set("+-*%|!#<>=&_~,")  # / special (divide vs fold); _ split; ~ match/sub; , join/enlist
+VERBS   = set("+-*%|!#<>=&_~,^")  # / special; _ split; ~ match/sub; , join; ^ exponent (dyadic)
 ADVERBS = set("/\\'")
 DYADIC_AWK = {'+':'+','-':'-','*':'*','%':'%','/':'/','<':'<','>':'>',
               '=':'==','&':'&&','|':'||'}
-SCALAR_DYADS = set("+-*%/<>=&|~")  # dyads that yield a scalar (so a bare one can filter); _ excluded
+SCALAR_DYADS = set("+-*%/<>=&|~^")  # dyads that yield a scalar (so a bare one can filter); _ , excluded
 
 # ---------- lex ----------
 def lex(src):
@@ -46,8 +46,12 @@ def lex(src):
         elif c == '?': toks.append(('q', '?')); i += 1
         elif c == ':': toks.append(('colon', ':')); i += 1
         elif c == '@': toks.append(('at',)); i += 1            # a@i -> index into a named array
-        elif c == ';': toks.append(('semi',)); i += 1          # statement separator
-        elif c == '^': toks.append(('caret',)); i += 1         # ^expr = END: run once at EOF, auto-print
+        elif c == ';':
+            if i+1 < len(src) and src[i+1] == ':': toks.append(('end',)); i += 2   # ;: = END (print time)
+            else: toks.append(('semi',)); i += 1                                    # statement separator
+        elif c == '.':                                         # .x = a named builtin (one letter)
+            if i+1 < len(src) and src[i+1].isalpha(): toks.append(('dot', src[i+1])); i += 2
+            else: raise SyntaxError("'.' needs a builtin letter (e.g. .u .l)")
         elif c == '"':                                   # string literal
             j = i+1; buf = ''
             while j < len(src) and src[j] != '"':
@@ -165,6 +169,8 @@ def verb_expr(atoms):
         if adv == "'":
             return ('each', body, verb_expr(atoms[1:]))   # map body over the vector at right
         raise SyntaxError(f"adverb {adv!r} on a function not in spike")
+    if a[0] == 'dot':                            # .u .l ... : a named builtin applied to its right
+        return ('dotcall', a[1], verb_expr(atoms[1:]))
     if a[0] == 'group':
         sub = parse(a[1])
         if len(atoms) == 1: return sub
@@ -485,7 +491,7 @@ def looks_numeric(v):
 def num(v):
     if isinstance(v, bool): return int(v)
     if isinstance(v, (int, float)): return v
-    s = str(v).strip()
+    s = (fmt_scalar(v) if isinstance(v, list) else str(v)).strip()
     try:
         if re.fullmatch(r'[+-]?\d+', s): return int(s)
         return float(s)
@@ -499,10 +505,18 @@ def truthy(v):
     return v != ''
 
 def fmt_scalar(v):
+    if isinstance(v, list):                                      # a vector stringifies: chars glue, else space-joined
+        sep = '' if getattr(v, 'flavor', None) == 'chars' else ' '
+        return sep.join(fmt_scalar(x) for x in v)
     if isinstance(v, bool):  return str(int(v))
     if isinstance(v, float): return str(int(v)) if v.is_integer() else ('%.6g' % v)
     if isinstance(v, int):   return str(v)
     return str(v)
+
+def as_seq(v):
+    if isinstance(v, list): return v
+    if isinstance(v, str):  return list(v)                       # a string IS its characters
+    raise SyntaxError("not a sequence — use ! to make a range from a number")
 
 def gsub(pattern, rep, s):
     """Replace every match of pattern in s. AWK-style replacement: & = whole
@@ -519,9 +533,9 @@ def gsub(pattern, rep, s):
     return re.sub(pattern, repl, s)
 
 class Interp:
-    def __init__(self, prog, fs=None):
-        self.pr  = [t for (e, t) in prog if not e]               # per-record statements
-        self.end = [t for (e, t) in prog if e]                   # ^-marked: run once at EOF
+    def __init__(self, pr, end, fs=None):
+        self.pr  = pr                                            # per-record statements
+        self.end = end                                           # ;: statements: run once at EOF
         self.env = {}                                            # persistent globals
         self.ofs = ' '
         self.fs  = fs
@@ -574,9 +588,8 @@ class Interp:
         if t == 'fieldat':
             return self.get_field(int(num(self.eval(node[1]))))
         if t == 'index':
-            arr = self.eval(node[1]); i = int(num(self.eval(node[2])))
-            if isinstance(arr, list): return arr[i-1] if 1 <= i <= len(arr) else ''
-            return ''
+            seq = as_seq(self.eval(node[1])); i = int(num(self.eval(node[2])))
+            return seq[i-1] if 1 <= i <= len(seq) else ''
         if t == 'tern':
             return self.eval(node[2]) if truthy(self.eval(node[1])) else self.eval(node[3])
         if t == 'assign':
@@ -584,6 +597,7 @@ class Interp:
         if t == 'monad':     return self.eval_monad(node)
         if t == 'dyad':      return self.eval_dyad(node)
         if t == 'gsub':      return self.eval_gsub(node)
+        if t == 'dotcall':   return self.dotcall(node[1], self.eval(node[2]))
         if t == 'each':      return self.eval_each(node)
         if t == 'whilescan': return self.eval_while(node, scan=True)
         if t == 'whileover': return self.eval_while(node, scan=False)
@@ -622,13 +636,16 @@ class Interp:
             return len(arg) if isinstance(arg, list) else len(fmt_scalar(arg))
         if sym == ',':                                   # enlist: wrap as a 1-element list (a row)
             return Vec([arg], 'seq')
+        if sym == '+':                                   # flip / transpose (K's monadic +)
+            return self.transpose(arg)
         raise SyntaxError(f"monadic {sym!r} not supported")
 
     def eval_dyad(self, node):
         sym = node[1][1]
-        if sym == '_':                                   # d_s : split s on separator d
-            sep = self.eval(node[2]); s = self.eval(node[3])
-            return Vec(self.split_str(s, fmt_scalar(sep)), 'field')
+        if sym == '_':                                   # d_s : split s on separator d  ("" = explode to chars)
+            sep = fmt_scalar(self.eval(node[2])); s = fmt_scalar(self.eval(node[3]))
+            if sep == '': return Vec(list(s), 'chars')
+            return Vec(self.split_str(s, sep), 'field')
         l = self.eval(node[2]); r = self.eval(node[3])
         if sym == ',':                                   # join: concatenate, flattening one level
             return self.join(l, r)
@@ -643,6 +660,27 @@ class Interp:
             return [x]                                   # a scalar contributes itself
         return Vec(elems(l) + elems(r), 'seq')
 
+    def dotcall(self, c, arg):                       # .u upper, .l lower, .j implode, .f/.c/.r floor/ceil/round
+        if c == 'j':                                 # .j : glue a vector's elements into one string
+            return ''.join(fmt_scalar(x) for x in as_seq(arg))
+        if isinstance(arg, list):
+            return Vec([self.dotcall(c, x) for x in arg], getattr(arg, 'flavor', 'field'))
+        if c == 'f': return math.floor(num(arg))
+        if c == 'c': return math.ceil(num(arg))
+        if c == 'r': return math.floor(num(arg) + 0.5)
+        if c == 'a': return abs(num(arg))
+        if c == 's': return math.sqrt(num(arg))
+        s = fmt_scalar(arg)
+        if c == 'u': return s.upper()
+        if c == 'l': return s.lower()
+        raise SyntaxError(f".{c} not supported")
+
+    def transpose(self, m):
+        if not isinstance(m, list): raise SyntaxError("transpose needs a list/matrix")
+        rows = ([r if isinstance(r, list) else [r] for r in m]
+                if any(isinstance(r, list) for r in m) else [list(m)])
+        return Vec([Vec(list(col), 'field') for col in zip(*rows)], 'seq')   # ragged rows truncate
+
     def eval_gsub(self, node):                           # ~[re;rep]target  /  ~[re]target (strip)
         pat = fmt_scalar(self.eval(node[1]))
         rep = None if node[2] is None else fmt_scalar(self.eval(node[2]))
@@ -652,14 +690,15 @@ class Interp:
         return gsub(pat, rep, fmt_scalar(target))
 
     def eval_each(self, node):
-        body, vec = node[1], self.eval(node[2])
-        if not isinstance(vec, list): raise SyntaxError("each needs a vector on its right")
+        body, raw = node[1], self.eval(node[2])
+        seq  = as_seq(raw)                                       # a string maps over its characters
+        flav = 'chars' if isinstance(raw, str) else getattr(raw, 'flavor', 'seq')
         saved = self.env.get('x'); out = []
-        for el in vec:
+        for el in seq:
             self.env['x'] = el; out.append(self.eval(body))
         if saved is None: self.env.pop('x', None)
         else: self.env['x'] = saved
-        return Vec(out, getattr(vec, 'flavor', 'seq'))
+        return Vec(out, flav)
 
     def eval_while(self, node, scan):
         cond, step, seed = node[1], node[2], node[3]
@@ -672,13 +711,14 @@ class Interp:
         return Vec(traj, 'seq') if scan else x
 
     def fold(self, sym, v):
-        if not isinstance(v, list): raise SyntaxError("fold needs a vector")
+        v = as_seq(v)                                    # fold over a string folds its characters
         if sym == ',':                                   # ,/ = raze: flatten one level
             acc = Vec([], 'seq')
             for el in v: acc = self.join(acc, el)
             return acc
-        acc = 1 if sym == '*' else 0
-        for el in v:
+        if not v: return 0                               # empty fold -> 0 (the "nothing" value)
+        acc = v[0]                                       # seed with the first element (reduce)
+        for el in v[1:]:
             if isinstance(acc, list) or isinstance(el, list):
                 acc = self.broadcast(sym, acc, el)       # rows -> column-wise reduction
             else:
@@ -696,19 +736,20 @@ class Interp:
         return Vec(out, fl)
 
     def binop(self, sym, l, r):
-        if sym in '+-*/%':
+        if sym in '+-*/%^':
             a, b = num(l), num(r)
             if sym == '+': return a + b
             if sym == '-': return a - b
             if sym == '*': return a * b
             if sym == '/': return a / b
             if sym == '%': return math.fmod(a, b)
+            if sym == '^': return a ** b
         if sym == '<': return 1 if self.cmp(l, r) < 0 else 0
         if sym == '>': return 1 if self.cmp(l, r) > 0 else 0
         if sym == '=': return 1 if self.cmp(l, r) == 0 else 0
-        if sym == '&': return 1 if (truthy(l) and truthy(r)) else 0
-        if sym == '|': return 1 if (truthy(l) or  truthy(r)) else 0
-        if sym == '~': return 1 if re.search(fmt_scalar(r), fmt_scalar(l)) is not None else 0
+        if sym == '&': return l if num(l) <= num(r) else r   # min  (= "and" on 0/1: falsy wins)
+        if sym == '|': return l if num(l) >= num(r) else r   # max  (= "or"  on 0/1: truthy wins)
+        if sym == '~': return len(re.findall(fmt_scalar(r), fmt_scalar(l)))   # match COUNT (0 = no match)
         raise SyntaxError(f"dyadic {sym!r} not supported")
 
     def cmp(self, l, r):
@@ -745,6 +786,8 @@ class Interp:
                 for row in val:
                     out.append(self.ofs.join(fmt_scalar(x) for x in row) if isinstance(row, list)
                                else fmt_scalar(row))
+            elif getattr(val, 'flavor', 'seq') == 'chars':       # a char-vector prints as its string
+                out.append(''.join(fmt_scalar(x) for x in val))
             elif getattr(val, 'flavor', 'seq') == 'field':
                 out.append(self.ofs.join(fmt_scalar(x) for x in val))
             else:
@@ -801,38 +844,153 @@ class Interp:
             self.emit(self.eval(tr), lines)
         return '\n'.join(lines)
 
+def split_program(atoms):
+    idx = next((i for i, a in enumerate(atoms) if a[0] == 'end'), None)
+    if idx is None:
+        return atoms, []
+    pre, post = atoms[:idx], atoms[idx+1:]
+    if any(a[0] == 'end' for a in post): raise SyntaxError("only one ;: per program")
+    return pre, post
+
 def interpret(src, data, fs=None):
-    stmts = split_statements(fold_adverbs(resolve_dollars(group(lex(src)))))
-    if not stmts: raise SyntaxError("empty program")
-    prog = []
-    for s in stmts:
-        if s[0][0] == 'caret':                                   # ^expr -> an END statement
-            if len(s) < 2: raise SyntaxError("^ needs an expression")
-            prog.append((True, parse(s[1:])))
-        else:
-            prog.append((False, parse(s)))
-    return Interp(prog, fs).run(data)
+    atoms = fold_adverbs(resolve_dollars(group(lex(src))))
+    pre, post = split_program(atoms)
+    pr  = [parse(s) for s in split_statements(pre)]
+    end = [parse(s) for s in split_statements(post)]
+    if not pr and not end: raise SyntaxError("empty program")
+    return Interp(pr, end, fs).run(data)
+
+    # ---- help system: glyph reference + an explainer that shows the grouping ----
+GLYPHS = {
+    # sym : (monadic,                              dyadic,                                 example)
+    '+': ("transpose a matrix",                    "add",                                  "+/!5  ->  15   (sum)"),
+    '-': ("",                                      "subtract",                             "-/!5  ->  -13"),
+    '*': ("",                                      "multiply",                             "*/!5  ->  120  (product)"),
+    '/': ("",                                      "divide (true division -> float)",      "ALSO the fold adverb: +/v"),
+    '%': ("",                                      "modulo / remainder",                   "7%3  ->  1"),
+    '^': ("",                                      "power (right-assoc): a^b",             "2^10  ->  1024"),
+    '<': ("",                                      "less-than  -> 1/0",                    "2<3  ->  1"),
+    '>': ("",                                      "greater-than  -> 1/0",                 "3>2  ->  1"),
+    '=': ("",                                      "equal  -> 1/0",                        "the FIRST top-level : is assign, not ="),
+    '&': ("",                                      "min  (on 0/1 = logical AND)",          "3&5 -> 3 ;  &/v -> min / all"),
+    '|': ("reverse a vector or string",            "max  (on 0/1 = logical OR)",           "3|5 -> 5 ;  |/v -> max / any"),
+    '!': ("iota: !n -> 1..n  (1-based)",           "",                                     "!4  ->  1 2 3 4"),
+    '#': ("count / length",                        "",                                     '#"hello"  ->  5'),
+    '_': ("split the line on FS -> vector",        'd_s: split s on sep d  (""_s -> chars)', '","_$0'),
+    '@': ("",                                      "a@i: i-th element/char (1-based)",     '"abc"@2  ->  b'),
+    '~': ("~[re]s strip ; ~[re;rep]s gsub",        "a~b: how many times b matches in a",   '$0~"err"  (filter) ; ~["[$]"]$2  (strip)'),
+    ',': ("enlist: wrap as a one-row matrix",      "join: concatenate, flatten one level", "build a matrix:  m:m,,$"),
+    '$': ("$ field-vector ; $0 line ; $n ; $(e)",  "",                                     "$2   +/$   $(N)"),
+    '?': ("",                                      "c?t:f  ternary (owns its :)",          'x%2?"odd":"even"'),
+    ':': ("",                                      "a:e assign ;  $0:e assigns AND prints","$0:+/$"),
+    "'": ("{f}'v : map f over v (each)",           "",                                     "{x*x}'!4  ->  1 4 9 16"),
+    '\\':("{c}{s}\\seed : while-scan (trajectory)","",                                     "{x>1}{x%2?1+3*x:x/2}\\6"),
+    ';': ("a;b : run statements left-to-right",    "",                                     ";: opens the END block (runs once at EOF)"),
+}
+DOTS = "  .u .l upper/lower   .j implode   .f .c .r floor/ceil/round   .a .s abs/sqrt"
+SPECIALS = "  N = NF (field count)   R = NR (record number)   F = FS   O = OFS"
+ADVERBS  = "  /  fold      '  each/map      \\  scan/while      ;:  END block"
+
+def show_help(arg=None):
+    if arg and arg in GLYPHS:
+        mon, dyad, ex = GLYPHS[arg]
+        out = [f"  {arg}"]
+        if mon:  out.append(f"    monadic   {mon}")
+        if dyad: out.append(f"    dyadic    {dyad}")
+        if ex:   out.append(f"    e.g.      {ex}")
+        return "\n".join(out)
+    lines = ["kawk glyph reference   (kawk -h SYM for one glyph; kawk --explain 'PROG' to see grouping)", "",
+             f"  {'':2} {'monadic':<34} dyadic"]
+    for sym, (mon, dyad, _ex) in GLYPHS.items():
+        lines.append(f"  {sym:<2} {mon:<34} {dyad}")
+    lines += ["", "DOT BUILTINS (." + "name):", DOTS, "", "SPECIAL VARS:", SPECIALS, "", "ADVERBS:", ADVERBS]
+    return "\n".join(lines)
+
+def _lhs(atoms):                                 # render an assignment's left side
+    out = []
+    for a in atoms:
+        if   a[0] == 'field':  out.append('$' + a[1])
+        elif a[0] == 'fields': out.append('$')
+        elif a[0] in ('var', 'special', 'int'): out.append(a[1])
+        else: out.append(str(a[1]) if len(a) > 1 else a[0])
+    return "".join(out)
+
+def render(n):                                   # parse tree -> fully-parenthesized source
+    try:
+        t = n[0]
+        if t == 'noun':
+            k = n[1]
+            return ('"%s"' % k[1]) if k[0] == 'str' else (('$' + k[1]) if k[0] == 'field' else k[1])
+        if t == 'fieldvec': return '$'
+        if t == 'fieldat':  return '$(' + render(n[1]) + ')'
+        if t == 'index':    return '(' + render(n[1]) + '@' + render(n[2]) + ')'
+        if t == 'tern':     return '(' + render(n[1]) + '?' + render(n[2]) + ':' + render(n[3]) + ')'
+        if t == 'assign':   return _lhs(n[1]) + ':' + render(n[2])
+        if t == 'dyad':     return '(' + render(n[2]) + n[1][1] + render(n[3]) + ')'
+        if t == 'monad':
+            sym, adv = n[1][1], n[1][2]
+            return '(' + sym + (adv or '') + render(n[2]) + ')'
+        if t == 'gsub':
+            inner = render(n[1]) + (';' + render(n[2]) if n[2] is not None else '')
+            return '~[' + inner + ']' + render(n[3])
+        if t == 'dotcall':  return '.' + n[1] + render(n[2])
+        if t == 'each':     return "({" + render(n[1]) + "}'" + render(n[2]) + ")"
+        if t == 'whilescan':return "{" + render(n[1]) + "}{" + render(n[2]) + "}\\" + render(n[3])
+        if t == 'whileover':return "{" + render(n[1]) + "}{" + render(n[2]) + "}/" + render(n[3])
+        return "<%s>" % t
+    except Exception:
+        return "<?>"
+
+def explain(src):
+    atoms = fold_adverbs(resolve_dollars(group(lex(src))))
+    pre, post = split_program(atoms)
+    out = ["how kawk grouped it (parentheses show the actual right-to-left structure):", ""]
+    for s in split_statements(pre):
+        out.append("  " + render(parse(s)))
+    if post:
+        out.append("  ;:   (END — runs once at EOF)")
+        for s in split_statements(post):
+            out.append("  " + render(parse(s)))
+    return "\n".join(out)
 
 def main():
     args = sys.argv[1:]
-    emit_awk = False; fs = None
-    while args and args[0] in ("--emit-awk",) or (args and args[0].startswith("-F")):
-        if args[0] == "--emit-awk": emit_awk = True; args = args[1:]
+    if args and args[0] in ("-h", "--help", "help"):
+        print(show_help(args[1] if len(args) > 1 else None)); return
+    emit_awk = False; explain_only = False; fs = None
+    while args and args[0] in ("--emit-awk", "--explain") or (args and args[0].startswith("-F")):
+        if   args[0] == "--emit-awk": emit_awk = True; args = args[1:]
+        elif args[0] == "--explain":  explain_only = True; args = args[1:]
         elif args[0] == "-F":
             if len(args) < 2: sys.exit("kawk.py: -F needs a separator")
             fs = args[1]; args = args[2:]
         else:  # -F<sep> glued
             fs = args[0][2:]; args = args[1:]
-    if not args: sys.exit("usage: kawk.py [--emit-awk] [-F sep] [-e '<program>' | <file.kk> | -]   (input on stdin)")
+    if not args: sys.exit("usage: kawk.py [-h [SYM]] [--explain] [-F sep] [-e '<prog>' | <file.kk> | -]   (input on stdin)")
     if args[0] == "-e":
         if len(args) < 2: sys.exit("kawk.py: -e needs a program string")
         src = args[1]
+    elif explain_only and not os.path.isfile(args[0]) and args[0] != "-":
+        src = args[0]                                            # --explain 'PROG' : treat as a literal snippet
     else:
         src = read_source(args[0])
     src = src.strip()
     if emit_awk:
         print(transpile(src)); return                            # the retired party trick
-    sys.stdout.write(interpret(src, sys.stdin.read(), fs))
-    sys.stdout.write('\n')
+    try:
+        if explain_only:
+            print(explain(src)); return
+        out = interpret(src, sys.stdin.read(), fs)
+    except SyntaxError as e:
+        sys.exit(f"kawk: {e}    (try: kawk --explain '{src}'  or  kawk -h)")
+    except ZeroDivisionError:
+        sys.exit("kawk: division by zero")
+    except RecursionError:
+        sys.exit("kawk: expression nested too deep")
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception as e:
+        sys.exit(f"kawk: {type(e).__name__}: {e}")
+    sys.stdout.write(out); sys.stdout.write('\n')
 
 if __name__=="__main__": main()

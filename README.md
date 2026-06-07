@@ -56,6 +56,20 @@ python3 kawk.py -e '+/!$0'          # interpret a literal program
 python3 kawk.py --emit-awk prog.kk  # print the retired AWK translation
 ```
 
+**When you get stuck.** Three things help, all built in:
+
+```sh
+kawk -h                  # the whole glyph reference
+kawk -h '~'              # just one glyph — monadic face, dyadic face, an example
+kawk --explain '2*3+4'   # ->  (2*(3+4))   — shows how it actually grouped
+```
+
+`--explain` is the one to reach for when a program does something surprising: it
+re-prints your code fully parenthesized, so the right-to-left grouping is visible.
+The classic trap — `x@2,(x@1)+x@2` quietly parsing as `(x@(2,((x@1)+(x@2))))`
+because `@` eats everything to its right — shows up immediately. And when a program
+errors, you get a one-line `kawk: ...` message, never a Python traceback.
+
 ## The language (what runs today)
 
 **How to read it.** Right-to-left, no precedence. `2*3+4` is `2*(3+4)`.
@@ -86,15 +100,20 @@ Use `( ... )` to override.
 
 | glyph | monadic | dyadic |
 |---|---|---|
-| `+ - * / %` | | arithmetic |
+| `+ - * / %` | (`+` = transpose a matrix) | arithmetic |
 | `< > =` | | compare (`=` is equality) |
-| `& \|` | (`\|` = reverse) | logical and / or |
+| `& \|` | (`\|` = reverse) | `&` = min, `\|` = max — and on `0`/`1` values that's exactly *and* / *or*, so `&/` is "all" and `\|/` is "any" |
 | `!` | iota: `1..n` (1-based, AWK-style) | |
 | `#` | length / count | |
-| `_` | split a string on `FS` → vector | `d_s`: split `s` on separator `d` |
-| `@` | | `a@i`: index element `i` of array `a` |
-| `~` | `~[re;rep]s`: gsub (`~[re]s` strips) | `a~b`: does `a` match regex `b`? → `1`/`0` |
+| `_` | split a string on `FS` → vector | `d_s`: split `s` on separator `d` (`""_s` explodes to chars) |
+| `@` | | `a@i`: index element `i` of array `a` — or character `i` of a string |
+| `~` | `~[re;rep]s`: gsub (`~[re]s` strips) | `a~b`: how many times `b` matches in `a` (0 = none; truthy = matched, so it still filters) |
 | `,` | enlist: wrap as a 1-element list (a row) | join: concatenate, flattening one level |
+| `^` | | exponent: `a^b` = a to the b (right-assoc) |
+| `.u .l` | upper / lower a string (`.`+letter = a named builtin) | |
+| `.f .c .r` | floor / ceil / round a number (broadcast over a vector) | |
+| `.a .s` | abs / sqrt a number (broadcast over a vector) | |
+| `.j` | implode: glue a vector's elements into one string (the way back from chars) | |
 
 **Adverbs** — iteration lives here, not in a loop statement
 
@@ -114,10 +133,11 @@ while (`\` `/`).
 - `a:expr` — assignment. `$0:expr` assigns to `$0` and prints the value.
 - `s1;s2;…` — **statements**, run left-to-right per record. The last one is
   the output; earlier ones are setup (bindings).
-- `^expr` — an **END** statement: runs once after the last record and prints its
-  value. When a program has an `^`, the per-record statements go silent (pure
-  accumulation), so you fold the whole stream and print a single result. It's the
-  record-axis `fold` to the per-record loop's implicit `each`.
+- `…;:expr` — the **END** boundary: everything after `;:` runs once after the
+  last record and prints its value. When a program has a `;:`, the per-record
+  statements go silent (pure accumulation), so you fold the whole stream and print
+  a single result. It's the record-axis `fold` to the per-record loop's implicit
+  `each`.
 - a bare expression is a **filter**: prints `$0` when it's truthy. (After a
   `;`, a trailing bare expression prints its *value* instead — you're past
   filtering and into computing.)
@@ -137,12 +157,34 @@ a:$;b:|a;+/b         fold a reversed copy               (chain bindings)
 A variable becomes an array the moment it's assigned a vector (`$`, `!n`, a
 split, a map, …); used anywhere else it's an ordinary scalar.
 
+**Strings are vectors too.** A string is just its sequence of characters, so the
+adverbs you learned on numbers work on strings — analogously, with no new verbs:
+
+```
+$0@2                 character 2 of the line            (index, 1-based)
+{.u x}'$0            uppercase each char                (each over chars -> "CAT")
++/$0                 fold over the chars                ("1234" -> 1+2+3+4 = 10)
+#$0                  length                             (count its chars)
+|$0                  reverse                            ("abc" -> "cba")
+""_$0                explode to a char-vector           (split on the empty string)
+.j"=",+/$0           …and back to a string              ("1234" -> "=10")
+```
+
+The round trip is `""_` (explode a string into chars) and `.j` (implode a vector
+back into one string). `.j` is also how you build output — `.j"score: ",s` glues
+the list `"score: ",s` into `score: 42`. Folding or mapping a *string* gives a
+string back; the char-vector remembers what it is and re-glues when printed. A
+field like `"42"` still coerces to the number `42` the moment arithmetic touches
+it (AWK's rule) — the adverbs iterate its characters, math reads its value.
+
+
 **Regex & text.** Patterns are plain strings (so there's no `/re/` literal and
 no divide-vs-regex lexer puzzle — a string already holds the regex). `~` matches;
 `~[…]` substitutes:
 
 ```
-$0~"err"             grep: keep lines matching err     (a bare match filters)
+$0~"err"             grep: keep lines matching err     (count>0 is truthy)
+$0:$0~"a"            count the a's in each line
 $0~"^[0-9]+$"        keep fully-numeric lines
 ~["o";"0"]$0         gsub: every o -> 0
 ~["[0-9]";"#"]$0     gsub a character class
@@ -154,31 +196,31 @@ $0~"^[0-9]+$"        keep fully-numeric lines
 Putting it together — sum a `$`-prefixed price column past the header, one line out:
 
 ```
-s:R>1?s+~["[$]"]$2:s;^s        # strip $, coerce, accumulate, print once; -F,
+s:R>1?s+~["[$]"]$2:s;:s        # strip $, coerce, accumulate, print once; -F,
 ```
 
-**Folding the stream.** `^` turns per-record accumulation into a single result —
+**Folding the stream.** `;:` turns per-record accumulation into a single result —
 the classic END-block reductions, terse:
 
 ```
-^R                   count the records
-s:s+$0;^s            sum a column
-c:c+$0~"err";^c      count lines matching err
-m:N>m?N:m;^m         widest row's field count
+;:R                  count the records
+s:s+$0;:s            sum a column
+c:c+$0~"err";:c      count lines matching err
+m:N>m?N:m;:m         widest row's field count
 ```
 
-**Matrices.** Collect rows with `,` (join) + `,` (enlist), `^`-print the result
+**Matrices.** Collect rows with `,` (join) + `,` (enlist), `;:`-print the result
 as a table. The adverbs you already have *are* the matrix algebra — fold reduces
 down the rows, each maps over them, reverse flips row order, `@` picks a row:
 
 ```
-m:m,,$;^m            echo the table back               (m,,$ = add this row)
-m:m,,$;^+/m          column sums  (fold + down rows)
-m:m,,$;^{+/x}'m      row sums     (each row -> its sum)
-m:m,,|$;^m           reverse every row, keep the table
-m:$0~"y"?m,,$:m;^m   collect only matching rows
-m:m,,$;^,/m          raze the matrix flat
-m:m,$2;^m            collect one column (atoms join flat)
+m:m,,$;:m            echo the table back               (m,,$ = add this row)
+m:m,,$;:+/m          column sums  (fold + down rows)
+m:m,,$;:{+/x}'m      row sums     (each row -> its sum)
+m:m,,|$;:m           reverse every row, keep the table
+m:$0~"y"?m,,$:m;:m   collect only matching rows
+m:m,,$;:,/m          raze the matrix flat
+m:m,$2;:m            collect one column (atoms join flat)
 ```
 
 An untouched `m` acts as an empty list the first time you join into it, so no
@@ -186,20 +228,23 @@ seed line is needed.
 
 ## Roadmap (designed, not yet built)
 
-- `BEGIN` setup as a leading `^{ … }` (END's mirror) — e.g. set `F` before the
-  first record without the `-F` flag.
-- A **transpose** verb — the one matrix move the adverbs don't give for free.
+- A `BEGIN` counterpart to `;:` (run-once *before* the stream) — e.g. set `F` in
+  the program instead of via the `-F` flag.
 - `/re/` **literal sugar** for bare-pattern grep (`/err/` vs `$0~"err"`). Low
   priority: string patterns already cover the power, and this is the one feature
   that needs the three-state `/` lexer, so it has to earn its complexity.
-- The long tail on a `.name` escape: `.substr`, `.upper`, `.sprintf`, …
+- The long tail on a `.name` escape: `.sprintf`, and friends.
 - Negative indexing: `$-1` for the last field.
 - Named functions (lambdas exist; named, recursive ones don't yet).
 - A two-variable `while` that closes over the seed — the one thing standing
   between here and palindrome-build.
-- **The text era** (well underway): coercion, `FS`/`OFS`, regex, `^` END, and
-  `,` matrices all work — mixed-CSV filter / map / reduce / collect runs end to
-  end. String builtins (`.substr`, `.upper`, `.sprintf`) are the main gap left.
+- **The text era** (well underway): coercion, `FS`/`OFS`, regex, `;:` END, `,`
+  matrices, `^` exponent, `.u`/`.l`, and **strings-as-char-vectors** (`@` index,
+  `'` each, `/` fold, `""_` explode, `.j` implode/concat) all work — mixed-CSV
+  filter / map / reduce / collect runs end to end, and substr / char-ops /
+  output-building now fall out of the vector machinery instead of needing their
+  own verbs. Still wanted: dyadic `!` ranges (numbers *and* letters, which also
+  gives substr-by-gather), and the terser adjacency-concat sugar (`"hi "a"!"`).
 
 ## Tests
 
