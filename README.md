@@ -73,7 +73,9 @@ errors, you get a one-line `kawk: ...` message, never a Python traceback.
 ## The language (what runs today)
 
 **How to read it.** Right-to-left, no precedence. `2*3+4` is `2*(3+4)`.
-Use `( ... )` to override.
+Use `( ... )` to override. A line whose first non-blank character is `#`
+followed by a space (or a lone `#`) is a comment; `#x` with no space is still
+the count verb.
 
 **Character classes**
 
@@ -119,8 +121,8 @@ Use `( ... )` to override.
 
 | form | meaning |
 |---|---|
-| `f/v` | **fold** — reduce a vector (`+/` is sum, `*/` is product) |
-| `f'v` | **each** — map a verb or `{lambda}` over a vector |
+| `f/v` | **fold** — reduce a vector (`+/` is sum, `*/` is product, `&/` is min/all) |
+| `f'v` | **each** — map a verb or `{lambda}` over a vector: `.u'$`, `#'$`, `{x*x}'!4` |
 | `{c}{f}\s` | **while-scan** — apply `f` to `s` while `c` holds; keep the whole trajectory |
 | `{c}{f}/s` | **while-over** — same, but keep only the final value |
 

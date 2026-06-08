@@ -243,6 +243,14 @@ t "explode-count"  '$0:#""_$0'          'hello'    '5'        # ""_ explodes to 
 t "concat"         '.j"hi ",$0'         'bob'      'hi bob'   # .j implodes a list into one string
 t "round-trip"     '$0:.j"=",+/$0'      '1234'     '=10'      # string -> math -> string, one breath
 t "str-reverse"    '$0:|$0'             'abc'      'cba'      # | already saw chars; still does
+t "verb-each"      ".u'\$"               'a b c'    'A B C'    # .u'$ : map a builtin over each, no lambda
+t "verb-each-len"  "\$0:#'\$"            'hi there' '2 5'      # #'$ : length of each field
+t "verb-each-str"  "\$0:.u'\$0"          'cat'      'CAT'      # map over each char, re-glues to a string
+
+echo "== comments (# at line start) =="
+t "comment-line"   '# sum 1..n
++/!$0'                '5'        '15'      # a full-line comment is dropped
+t "hash-is-count"  '#$0'                 'hello'    '5'       # '#' before non-space is still the count verb
 
 echo "== help system =="
 # c NAME  CMD  SUBSTRING  : command output must contain SUBSTRING (and never a Python traceback)

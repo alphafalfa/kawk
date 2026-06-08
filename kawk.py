@@ -79,7 +79,9 @@ def fold_adverbs(atoms):
         elif a[0] == 'adv':
             prev = out[-1] if out else None
             if prev and prev[0] == 'verb2' and prev[2] is None:
-                out[-1] = ('verb2', prev[1], a[1])            # +/  */  f'   (adverb on verb)
+                out[-1] = ('verb2', prev[1], a[1])            # +/  */  f'   (adverb on a verb)
+            elif prev and prev[0] == 'dot':
+                out[-1] = ('dotadv', prev[1], a[1])           # .u'  .f'  (adverb on a named builtin)
             elif prev and prev[0] in ('group', 'lam'):
                 out[-1] = ('adverbed', a[1], prev)            # each/over a function
             elif a[1] == '/':
@@ -169,6 +171,9 @@ def verb_expr(atoms):
         if adv == "'":
             return ('each', body, verb_expr(atoms[1:]))   # map body over the vector at right
         raise SyntaxError(f"adverb {adv!r} on a function not in spike")
+    if a[0] == 'dotadv':                             # .u'v : map the builtin .u over each of v
+        body = ('dotcall', a[1], ('noun', ('var', 'x')))
+        return ('each', body, verb_expr(atoms[1:]))
     if a[0] == 'dot':                            # .u .l ... : a named builtin applied to its right
         return ('dotcall', a[1], verb_expr(atoms[1:]))
     if a[0] == 'group':
@@ -188,6 +193,9 @@ def verb_expr(atoms):
         if v[0] != 'verb2': raise SyntaxError("two nouns in a row")
         return ('dyad', v, node, verb_expr(atoms[2:]))
     if a[0] == 'verb2':
+        if a[2] == "'":                              # f'v : map the monadic verb f over each of v
+            body = ('monad', (a[0], a[1], None), ('noun', ('var', 'x')))
+            return ('each', body, verb_expr(atoms[1:]))
         if a[1] == '~' and len(atoms) >= 2 and atoms[1][0] == 'bracket':
             args = [parse(g) for g in split_statements(atoms[1][1])]   # [re] strip / [re;rep] gsub
             if not 1 <= len(args) <= 2: raise SyntaxError("~ takes [re] or [re;rep]")
@@ -557,7 +565,8 @@ class Interp:
 
     def set_field(self, n, val):
         if isinstance(val, list):                                # a vector into a field -> joined record
-            val = self.ofs.join(fmt_scalar(x) for x in val)
+            sep = '' if getattr(val, 'flavor', None) == 'chars' else self.ofs
+            val = sep.join(fmt_scalar(x) for x in val)
         s = fmt_scalar(val)
         if n == 0:
             self.set_record(s)
@@ -852,8 +861,19 @@ def split_program(atoms):
     if any(a[0] == 'end' for a in post): raise SyntaxError("only one ;: per program")
     return pre, post
 
+def strip_comments(src):
+    # A whole-line comment: first non-blank char is '#' followed by space or end-of-line.
+    # (so '#$0', '#"x"', '#a' stay the count verb; only '# ...' or a lone '#' is a comment)
+    keep = []
+    for line in src.split('\n'):
+        s = line.lstrip()
+        if s[:1] == '#' and (len(s) == 1 or s[1].isspace()):
+            continue
+        keep.append(line)
+    return '\n'.join(keep)
+
 def interpret(src, data, fs=None):
-    atoms = fold_adverbs(resolve_dollars(group(lex(src))))
+    atoms = fold_adverbs(resolve_dollars(group(lex(strip_comments(src)))))
     pre, post = split_program(atoms)
     pr  = [parse(s) for s in split_statements(pre)]
     end = [parse(s) for s in split_statements(post)]
@@ -883,7 +903,7 @@ GLYPHS = {
     '$': ("$ field-vector ; $0 line ; $n ; $(e)",  "",                                     "$2   +/$   $(N)"),
     '?': ("",                                      "c?t:f  ternary (owns its :)",          'x%2?"odd":"even"'),
     ':': ("",                                      "a:e assign ;  $0:e assigns AND prints","$0:+/$"),
-    "'": ("{f}'v : map f over v (each)",           "",                                     "{x*x}'!4  ->  1 4 9 16"),
+    "'": ("{f}'v map f over v ;  g'v maps a bare verb/builtin (.u'$, #'$)", "", "{x*x}'!4 -> 1 4 9 16 ;  .u'$"),
     '\\':("{c}{s}\\seed : while-scan (trajectory)","",                                     "{x>1}{x%2?1+3*x:x/2}\\6"),
     ';': ("a;b : run statements left-to-right",    "",                                     ";: opens the END block (runs once at EOF)"),
 }
@@ -942,7 +962,7 @@ def render(n):                                   # parse tree -> fully-parenthes
         return "<?>"
 
 def explain(src):
-    atoms = fold_adverbs(resolve_dollars(group(lex(src))))
+    atoms = fold_adverbs(resolve_dollars(group(lex(strip_comments(src)))))
     pre, post = split_program(atoms)
     out = ["how kawk grouped it (parentheses show the actual right-to-left structure):", ""]
     for s in split_statements(pre):
