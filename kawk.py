@@ -36,6 +36,9 @@ def lex(src):
         elif c.isdigit():
             j = i
             while j < len(src) and src[j].isdigit(): j += 1
+            if j < len(src) and src[j] == '.' and j+1 < len(src) and src[j+1].isdigit():
+                j += 1                                            # the decimal point
+                while j < len(src) and src[j].isdigit(): j += 1   # the fractional digits
             toks.append(('int', src[i:j])); i = j
         elif c == '(': toks.append(('lp', '(')); i += 1
         elif c == ')': toks.append(('rp', ')')); i += 1
@@ -49,9 +52,13 @@ def lex(src):
         elif c == ';':
             if i+1 < len(src) and src[i+1] == ':': toks.append(('end',)); i += 2   # ;: = END (print time)
             else: toks.append(('semi',)); i += 1                                    # statement separator
-        elif c == '.':                                         # .x = a named builtin (one letter)
+        elif c == '.':                                         # .x = builtin (letter) ; .5 = decimal (digit)
             if i+1 < len(src) and src[i+1].isalpha(): toks.append(('dot', src[i+1])); i += 2
-            else: raise SyntaxError("'.' needs a builtin letter (e.g. .u .l)")
+            elif i+1 < len(src) and src[i+1].isdigit():
+                j = i+1
+                while j < len(src) and src[j].isdigit(): j += 1
+                toks.append(('int', src[i:j])); i = j            # leading-decimal float: .5  .33
+            else: raise SyntaxError("'.' needs a builtin letter (e.g. .u .l) or a digit (e.g. .5)")
         elif c == '"':                                   # string literal
             j = i+1; buf = ''
             while j < len(src) and src[j] != '"':
@@ -69,11 +76,32 @@ def lex(src):
     return toks
 
 # ---------- fold-merge: an adverb glues to the verb/lambda on its LEFT ----------
+def imply_x(body):
+    # Sugar: a lambda whose body omits its argument gets an implicit `x` filled into
+    # the ONE provable hole. Only fires when (a) `x` isn't already named, and (b) the
+    # missing operand sits at a provable edge. Anything ambiguous is left untouched.
+    if not body: return body
+    names = lambda a: a[0] == 'var' and a[1] == 'x'
+    if any(names(a) for a in body): return body                  # you named x -> hands off
+    xn = ('var', 'x')
+    if len(body) == 1 and body[0][0] in ('dot', 'dotadv'):       # {.u} -> {.u x}
+        return body + [xn]
+    head_dyad = body[0][0] == 'verb2' and body[0][2] is None     # {>9}  -> {x>9}   (left hole)
+    tail_dyad = body[-1][0] == 'verb2' and body[-1][2] is None   # {z_}  -> {z_x}   (right hole)
+    if head_dyad and not tail_dyad: return [xn] + body
+    if tail_dyad and not head_dyad: return body + [xn]
+    if head_dyad and tail_dyad:                                  # {>} {*} : a hole on BOTH sides
+        raise SyntaxError(f"ambiguous implicit x in {{{body[0][1]}}} — name it: "
+                          f"{{x{body[0][1]}x}} or {{x{body[0][1]}…}}")
+    return body                                                  # no hole, or nothing to fill
+
 def fold_adverbs(atoms):
     out = []
     for a in atoms:
-        if a[0] in ('group', 'lam', 'bracket'):
-            out.append((a[0], fold_adverbs(a[1])))            # recurse into bodies
+        if a[0] == 'lam':
+            out.append(('lam', imply_x(fold_adverbs(a[1]))))     # recurse, then fill an implicit x
+        elif a[0] in ('group', 'bracket'):
+            out.append((a[0], fold_adverbs(a[1])))               # recurse into bodies
         elif a[0] == 'verb':
             out.append(('verb2', a[1], None))
         elif a[0] == 'adv':
@@ -165,6 +193,9 @@ def verb_expr(atoms):
         if adv == '\\': return ('whilescan', cond, step, seed)
         if adv == '/':  return ('whileover', cond, step, seed)
         raise SyntaxError(f"adverb {adv!r} after a condition not in spike")
+    if a[0] == 'lam' and len(atoms) >= 2 and atoms[1][0] == 'verb2' and atoms[1][1] == '#':
+        # {pred}#v : keep the elements of v where the predicate holds (filter-by-predicate)
+        return ('dyad', atoms[1], ('predfilter', parse(a[1])), verb_expr(atoms[2:]))
     if a[0] == 'adverbed':                       # a function carrying an adverb
         adv, inner = a[1], a[2]
         body = parse(inner[1])                   # the lambda/group body, as a tree
@@ -554,7 +585,10 @@ class Interp:
 
     # ---- record / field plumbing ----
     def set_record(self, line):
-        parts = line.split() if self.fs is None else (re.split(self.fs, line) if line != '' else [])
+        if self.fs is None:      parts = line.split()              # default: split on whitespace runs
+        elif self.fs == '':      parts = list(line)                # empty FS: one field per character (AWK)
+        elif line == '':         parts = []
+        else:                    parts = re.split(self.fs, line)
         self.fields = [line] + parts
         self.nf = len(parts)
 
@@ -581,7 +615,7 @@ class Interp:
         t = node[0]
         if t == 'noun':
             a = node[1]
-            if a[0] == 'int':   return int(a[1])
+            if a[0] == 'int':   return float(a[1]) if '.' in a[1] else int(a[1])
             if a[0] == 'str':   return a[1]
             if a[0] == 'field': return self.get_field(int(a[1]))
             if a[0] == 'var':   return self.env.get(a[1], '')
@@ -597,8 +631,11 @@ class Interp:
         if t == 'fieldat':
             return self.get_field(int(num(self.eval(node[1]))))
         if t == 'index':
-            seq = as_seq(self.eval(node[1])); i = int(num(self.eval(node[2])))
-            return seq[i-1] if 1 <= i <= len(seq) else ''
+            seq = as_seq(self.eval(node[1])); idx = self.eval(node[2])
+            pick = lambda i: seq[i-1] if 1 <= i <= len(seq) else ''
+            if isinstance(idx, list):                    # a@[i j k] : gather several elements
+                return Vec([pick(int(num(i))) for i in idx], getattr(idx, 'flavor', 'seq'))
+            return pick(int(num(idx)))
         if t == 'tern':
             return self.eval(node[2]) if truthy(self.eval(node[1])) else self.eval(node[3])
         if t == 'assign':
@@ -647,10 +684,29 @@ class Interp:
             return Vec([arg], 'seq')
         if sym == '+':                                   # flip / transpose (K's monadic +)
             return self.transpose(arg)
+        if sym == '-':                                   # negate
+            return Vec([-num(x) for x in arg], getattr(arg, 'flavor', 'seq')) if isinstance(arg, list) else -num(arg)
+        if sym in ('<', '>'):                            # grade: the indices that would sort arg (1-based)
+            seq = as_seq(arg)
+            allnum = all(looks_numeric(x) for x in seq)
+            key = (lambda i: num(seq[i])) if allnum else (lambda i: fmt_scalar(seq[i]))
+            order = sorted(range(len(seq)), key=key, reverse=(sym == '>'))
+            return Vec([i + 1 for i in order], 'seq')
         raise SyntaxError(f"monadic {sym!r} not supported")
 
     def eval_dyad(self, node):
         sym = node[1][1]
+        if sym == '#' and node[2][0] == 'predfilter':     # {pred}#v : keep v where the predicate holds
+            vec = as_seq(self.eval(node[3]))
+            body = node[2][1]
+            rv = self.eval(node[3]); flav = getattr(rv, 'flavor', 'seq') if isinstance(rv, list) else 'seq'
+            saved = self.env.get('x'); keep = []
+            for el in vec:
+                self.env['x'] = el
+                if truthy(self.eval(body)): keep.append(el)
+            if saved is None: self.env.pop('x', None)
+            else: self.env['x'] = saved
+            return Vec(keep, flav)
         if sym == '_':                                   # d_s : split s on separator d  ("" = explode to chars)
             sep = fmt_scalar(self.eval(node[2])); s = fmt_scalar(self.eval(node[3]))
             if sep == '': return Vec(list(s), 'chars')
@@ -658,6 +714,11 @@ class Interp:
         l = self.eval(node[2]); r = self.eval(node[3])
         if sym == ',':                                   # join: concatenate, flattening one level
             return self.join(l, r)
+        if sym == '#':                                   # mask#v : keep elements of v where mask is truthy
+            mask = as_seq(l); vec = as_seq(r)
+            flav = getattr(r, 'flavor', 'seq') if isinstance(r, list) else 'seq'
+            keep = [vec[i] for i in range(min(len(mask), len(vec))) if truthy(mask[i])]
+            return Vec(keep, flav)
         if isinstance(l, list) or isinstance(r, list):
             return self.broadcast(sym, l, r)
         return self.binop(sym, l, r)
@@ -845,6 +906,7 @@ class Interp:
     def run(self, data):
         records = data.split('\n')
         if records and records[-1] == '': records.pop()          # drop final-newline empty
+        if not records: records = ['']                           # no input -> one empty record (awk <<< "")
         lines = []
         for rec in records:
             self.nr += 1
@@ -884,20 +946,20 @@ def interpret(src, data, fs=None):
 GLYPHS = {
     # sym : (monadic,                              dyadic,                                 example)
     '+': ("transpose a matrix",                    "add",                                  "+/!5  ->  15   (sum)"),
-    '-': ("",                                      "subtract",                             "-/!5  ->  -13"),
+    '-': ("negate",                                "subtract",                             "-/!5  ->  -13"),
     '*': ("",                                      "multiply",                             "*/!5  ->  120  (product)"),
     '/': ("",                                      "divide (true division -> float)",      "ALSO the fold adverb: +/v"),
     '%': ("",                                      "modulo / remainder",                   "7%3  ->  1"),
     '^': ("",                                      "power (right-assoc): a^b",             "2^10  ->  1024"),
-    '<': ("",                                      "less-than  -> 1/0",                    "2<3  ->  1"),
-    '>': ("",                                      "greater-than  -> 1/0",                 "3>2  ->  1"),
+    '<': ("grade up: indices that sort ascending (v@<v sorts v)", "less-than -> 1/0", "$@<$ sorts ; <[30 10 20]->2 3 1"),
+    '>': ("grade down: indices that sort descending",  "greater-than -> 1/0",                 "$@>$ sorts high->low"),
     '=': ("",                                      "equal  -> 1/0",                        "the FIRST top-level : is assign, not ="),
     '&': ("",                                      "min  (on 0/1 = logical AND)",          "3&5 -> 3 ;  &/v -> min / all"),
     '|': ("reverse a vector or string",            "max  (on 0/1 = logical OR)",           "3|5 -> 5 ;  |/v -> max / any"),
     '!': ("iota: !n -> 1..n  (1-based)",           "",                                     "!4  ->  1 2 3 4"),
-    '#': ("count / length",                        "",                                     '#"hello"  ->  5'),
+    '#': ("count / length",                        "mask#v compress ;  {pred}#v keep where the predicate holds", '#"hi"->2 ; {0=x%2}#!N'),
     '_': ("split the line on FS -> vector",        'd_s: split s on sep d  (""_s -> chars)', '","_$0'),
-    '@': ("",                                      "a@i: i-th element/char (1-based)",     '"abc"@2  ->  b'),
+    '@': ("",                                      "a@i element (1-based) ; a@[i j] gathers several", '"abc"@2->b ; $@<$ sorts'),
     '~': ("~[re]s strip ; ~[re;rep]s gsub",        "a~b: how many times b matches in a",   '$0~"err"  (filter) ; ~["[$]"]$2  (strip)'),
     ',': ("enlist: wrap as a one-row matrix",      "join: concatenate, flatten one level", "build a matrix:  m:m,,$"),
     '$': ("$ field-vector ; $0 line ; $n ; $(e)",  "",                                     "$2   +/$   $(N)"),

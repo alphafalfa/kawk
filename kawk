@@ -16,12 +16,16 @@ case "$1" in
     --explain)      shift; exec python3 "$here/kawk.py" --explain "$@" ;;
 esac
 
-debug=0; fsopt=""
+debug=0; has_fs=0; fs=""
 while :; do
     case "$1" in
         -d)  debug=1; shift ;;
-        -F)  fsopt="-F $2"; shift 2 ;;
-        -F*) fsopt="-F ${1#-F}"; shift ;;
+        -F)  has_fs=1
+             # bare -F: only consume the next token as the separator if it isn't the program file.
+             # (`-F ''` spaced gives a real empty arg here; `-F''` glued collapses to a bare -F)
+             if [ "$#" -ge 2 ] && [ ! -f "$2" ] && [ ! -f "$2.kk" ]; then fs=$2; shift 2
+             else fs=""; shift; fi ;;
+        -F*) has_fs=1; fs=${1#-F}; shift ;;
         *)   break ;;
     esac
 done
@@ -39,8 +43,15 @@ fi
     printf '%s\n' '--- would-be awk (retired backend) ---' "$awk" '--------------------------------------' >&2
 }
 
+run() {                                  # pass -F (with its value, even if empty) only when given
+    if [ "$has_fs" = 1 ]; then python3 "$here/kawk.py" -F "$fs" "$prog"
+    else                       python3 "$here/kawk.py" "$prog"; fi
+}
+
 if [ "$#" -gt 0 ] && [ ! -f "$1" ]; then
-    printf '%s\n' "$@" | python3 "$here/kawk.py" $fsopt "$prog"
+    printf '%s\n' "$@" | run
+elif [ "$#" -eq 0 ] && [ -t 0 ]; then
+    printf '\n' | run                       # no data + interactive: run once on an empty record (don't hang)
 else
-    cat -- "$@" | python3 "$here/kawk.py" $fsopt "$prog"
+    cat -- "$@" | run
 fi

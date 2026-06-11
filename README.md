@@ -123,6 +123,11 @@ the count verb.
 |---|---|
 | `f/v` | **fold** — reduce a vector (`+/` is sum, `*/` is product, `&/` is min/all) |
 | `f'v` | **each** — map a verb or `{lambda}` over a vector: `.u'$`, `#'$`, `{x*x}'!4` |
+
+A lambda may drop `x` when its argument sits in one *provable* hole: `{>9}` is
+`{x>9}`, `{z_}` is `{z_x}`, `{.u}` is `{.u x}`. The instant `x` is needed twice or
+on a side the parser can't pin (`{x*x}`, `{1-x}`), you name it — and an ambiguous
+tacit body (`{*}`, `{>}`) is rejected with a message, never guessed.
 | `{c}{f}\s` | **while-scan** — apply `f` to `s` while `c` holds; keep the whole trajectory |
 | `{c}{f}/s` | **while-over** — same, but keep only the final value |
 

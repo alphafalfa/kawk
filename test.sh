@@ -247,6 +247,30 @@ t "verb-each"      ".u'\$"               'a b c'    'A B C'    # .u'$ : map a bu
 t "verb-each-len"  "\$0:#'\$"            'hi there' '2 5'      # #'$ : length of each field
 t "verb-each-str"  "\$0:.u'\$0"          'cat'      'CAT'      # map over each char, re-glues to a string
 
+t "decimal"        '$0:.5*$0'           '4'        '2'        # .5 is a number, not a dot-builtin
+t "decimal-add"    '$0:1.5+2.5'          'x'        '4'        # decimals lex & add
+t "dot-after-int"  '$0:0.25*4'           'x'        '1'        # 0.25 one float token
+t "empty-input"    '$0:"ok"'             ''         'ok'       # empty input still runs once (awk <<< "")
+
+echo "== implicit x (single provable hole) =="
+t "implicit-left"  '$0:{>9}'"'"'!12'     'x'        '0 0 0 0 0 0 0 0 0 1 1 1'  # {>9}->{x>9}: mask of >9
+t "implicit-right" "\$0:.j{z_}'\$0"       'ab'       'ab'       # {z_} -> {z_x} : explode each (right hole)
+t "implicit-mono"  "\$0:.j{.u}'\$0"       'cat'      'CAT'      # {.u} -> {.u x} : lone monadic
+t "implicit-root"  '$0:{>9}{+/z_}/$0'    '12345'    '6'        # digital root, fully tacit
+t "named-x-intact" "\$0:{x*x}'!3"         'x'        '1 4 9'    # naming x is untouched by the sugar
+
+t "compress"       '$0:({0=x%2}'"'"'!$)#!$'  '10'  '2 4 6 8 10'  # mask#v keeps where mask truthy
+t "compress-none"  '$0:({x>9}'"'"'!$)#!$'    '5'   ''           # nothing passes -> empty
+t "primes-to-n"    '$0:({2=+/0=x%!x}'"'"'!$)#!$'  '13'  '2 3 5 7 11 13'  # primes via compress
+t "pred-filter"    '$0:{0=x%2}#!$'      '10'  '2 4 6 8 10'  # {pred}#v filter-by-predicate
+t "pred-primes"    '$0:{2=+/0=x%!x}#!$'  '13'  '2 3 5 7 11 13'  # primes, single $
+t "grade-up"       '$0:<$'              '30 10 20'  '2 3 1'      # < = sort indices (ascending)
+t "sort-num"       '$0:$@<$'           '3 1 20 100'  '1 3 20 100'  # $@<$ sorts numerically
+t "sort-alpha"     '$0:$@<$'           'cat ant bee'  'ant bee cat'  # text sorts alphabetically
+t "sort-desc"      '$0:$@>$'           '5 3 8 1'    '8 5 3 1'    # > = descending
+t "gather"         '$0:$@3,1'          'a b c d'    'c a'        # @ with a vector gathers
+t "negate"         '$0:-$'             '3 -1 4'     '-3 1 -4'    # monadic - negates
+
 echo "== comments (# at line start) =="
 t "comment-line"   '# sum 1..n
 +/!$0'                '5'        '15'      # a full-line comment is dropped
