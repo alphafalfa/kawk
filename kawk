@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025 d00s.  See the LICENSE file for the full GNU GPL v3 text.
 # kawk -- run a .kk program through the kawk interpreter.
 #   ./kawk prog.kk [data ...]          run prog.kk on data files (or stdin)
 #   ./kawk -F, prog.kk [data ...]      set the field separator

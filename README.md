@@ -1,6 +1,7 @@
 # kawk
 
-A small array language: K's ergonomics on AWK's data model.
+A tiny, readable array language: K's operators, AWK's data model, numbers and
+text treated alike.
 
 AWK has no `reverse`, no `sum`, no `sort`, no `map` — so you spell every one of
 them as a loop. kawk gives them back as single glyphs, so the `for` loop goes
@@ -267,3 +268,9 @@ green.
 ## License
 
 _Your call._
+
+## License
+
+GPL-3.0-or-later. kawk is free software — use, study, and share it freely; if you
+distribute it or a derivative, keep it open under the same terms. See the
+[LICENSE](LICENSE) file for the full text.

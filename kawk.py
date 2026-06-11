@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025 d00s.  See the LICENSE file for the full GNU GPL v3 text.
 """
-kawk -- a tiny K-flavored language that transpiles to AWK.
+kawk -- a tiny, readable array language. K's operators, AWK's data model,
+numbers and text treated alike. A Python tree-walking interpreter; the old
+AWK-transpiler backend is retired to `--emit-awk`.
 
 Slab 2: the scalar layer on top of the expression core.
   - verbs: + - * % / (arith), < > = (compare, = is equality), & | (logical/or)
