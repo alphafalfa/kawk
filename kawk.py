@@ -752,6 +752,11 @@ class Interp:
         return Vec(elems(l) + elems(r), 'seq')
 
     def dotcall(self, c, arg):                       # .u upper, .l lower, .j implode, .f/.c/.r floor/ceil/round
+        if c in ('p', 'P'):                          # tap: print arg, pass it through unchanged.
+            buf = []; self.emit(arg, buf)            #   .p -> stdout (the common one)
+            stream = sys.stderr if c == 'P' else sys.stdout   #   .P -> stderr (the debug shout)
+            stream.write('\n'.join(buf) + '\n'); stream.flush()
+            return arg
         if c == 'j':                                 # .j : glue a vector's elements into one string
             return ''.join(fmt_scalar(x) for x in as_seq(arg))
         if isinstance(arg, list):
@@ -1001,7 +1006,7 @@ GLYPHS = {
     '\\':("{c}{s}\\seed : while-scan (trajectory)","",                                     "{x>1}{x%2?1+3*x:x/2}\\6"),
     ';': ("a;b : run statements left-to-right",    "",                                     ";: opens the END block (runs once at EOF)"),
 }
-DOTS = "  .u .l upper/lower   .j implode   .f .c .r floor/ceil/round   .a .s abs/sqrt   .o .h ord/chr"
+DOTS = "  .u .l upper/lower   .j implode   .f .c .r floor/ceil/round   .a .s abs/sqrt   .o .h ord/chr   .p tap->stdout  .P tap->stderr"
 SPECIALS = "  N = NF (field count)   R = NR (record number)   F = FS   O = OFS"
 ADVERBS  = "  /  fold      '  each/map      \\  scan/while      ;:  END block"
 

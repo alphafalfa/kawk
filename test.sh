@@ -304,6 +304,11 @@ t "ord"           '$0:.o$0'           'A'    '65'    # .o ord: char -> codepoint
 t "chr"           '$0:.h$0'           '65'   'A'     # .h chr: codepoint -> char
 t "letter-pos"     '$0:(.o$0)-64'      'T'    '20'    # T is the 20th letter
 t "chr-build"      '$0:.j.h$'          '72 105'  'Hi'  # build a string from codepoints
+t "tap-passthru"   '$0:+/.p!$'         '4'    '1
+2
+3
+4
+10'  # .p taps stdout, passes value on
 
 echo "== comments (# at line start) =="
 t "comment-line"   '# sum 1..n
