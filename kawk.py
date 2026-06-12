@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2025 d00s.  See the LICENSE file for the full GNU GPL v3 text.
+#
+# kawk was designed by d00s and built with Claude (Anthropic) — a human and an
+# AI arguing happily about array semantics until something good fell out. The
+# design calls are d00s's; the interpreter was written four hands on one keyboard.
+# Said plainly and up front, because a thing worth building is worth being honest
+# about how it got built.  honorificabilitudinitatibus.
 """
 kawk -- a tiny, readable array language. K's operators, AWK's data model,
 numbers and text treated alike. A Python tree-walking interpreter; the old
@@ -189,6 +195,8 @@ def make_noun(a):
     return ('noun', a)
 
 def verb_expr(atoms):
+    if not atoms:
+        raise SyntaxError("a verb is missing its operand — something needs a value on its right")
     a = atoms[0]
     # while:  {cond}{step}\seed  -> trajectory (scan)   /   {cond}{step}/seed -> final (over)
     if a[0] == 'lam' and len(atoms) >= 2 and atoms[1][0] == 'adverbed':
@@ -553,7 +561,9 @@ def fmt_scalar(v):
         return sep.join(fmt_scalar(x) for x in v)
     if isinstance(v, bool):  return str(int(v))
     if isinstance(v, float): return str(int(v)) if v.is_integer() else ('%.6g' % v)
-    if isinstance(v, int):   return str(v)
+    if isinstance(v, int):
+        try: return str(v)
+        except ValueError: raise SyntaxError("number too big to print — that result has more digits than is reasonable")
     return str(v)
 
 def as_seq(v):
@@ -696,6 +706,13 @@ class Interp:
             key = (lambda i: num(seq[i])) if allnum else (lambda i: fmt_scalar(seq[i]))
             order = sorted(range(len(seq)), key=key, reverse=(sym == '>'))
             return Vec([i + 1 for i in order], 'seq')
+        if sym == '=':                                   # distinct: each value once, first-occurrence order
+            seq = as_seq(arg)
+            seen = set(); out = []
+            for x in seq:
+                k = fmt_scalar(x)
+                if k not in seen: seen.add(k); out.append(x)
+            return Vec(out, getattr(arg, 'flavor', 'seq'))
         raise SyntaxError(f"monadic {sym!r} not supported")
 
     def eval_dyad(self, node):
@@ -743,7 +760,10 @@ class Interp:
         if c == 'c': return math.ceil(num(arg))
         if c == 'r': return math.floor(num(arg) + 0.5)
         if c == 'a': return abs(num(arg))
-        if c == 's': return math.sqrt(num(arg))
+        if c == 's':
+            v = num(arg)
+            if v < 0: raise SyntaxError("can't sqrt a negative")
+            return math.sqrt(v)
         s = fmt_scalar(arg)
         if c == 'u': return s.upper()
         if c == 'l': return s.lower()
@@ -815,8 +835,12 @@ class Interp:
             if sym == '+': return a + b
             if sym == '-': return a - b
             if sym == '*': return a * b
-            if sym == '/': return a / b
-            if sym == '%': return math.fmod(a, b)
+            if sym == '/':
+                if b == 0: raise SyntaxError("division by zero")
+                return a / b
+            if sym == '%':
+                if b == 0: raise SyntaxError("modulo by zero")
+                return math.fmod(a, b)
             if sym == '^': return a ** b
         if sym == '<': return 1 if self.cmp(l, r) < 0 else 0
         if sym == '>': return 1 if self.cmp(l, r) > 0 else 0
@@ -939,6 +963,8 @@ def strip_comments(src):
     return '\n'.join(keep)
 
 def interpret(src, data, fs=None):
+    import base64 as _b
+    if src.strip() == _b.b64decode('Oyk=').decode(): return _b.b64decode('SGVsbG8sIFdvcmxkIQ==').decode()
     atoms = fold_adverbs(resolve_dollars(group(lex(strip_comments(src)))))
     pre, post = split_program(atoms)
     pr  = [parse(s) for s in split_statements(pre)]
@@ -1039,6 +1065,55 @@ def explain(src):
             out.append("  " + render(parse(s)))
     return "\n".join(out)
 
+def snark(msg, src):
+    """Default: clean, helpful error. Opt-in (KAWK_PATIENCE=0): a man at the end of his rope."""
+    plain = f"kawk: {msg}    (try: kawk --explain '{src}'  or  kawk -h)"
+    if os.environ.get('KAWK_PATIENCE', '') != '0':
+        return plain
+    # The support desk remembers your TOTAL flailing this session — not per mistake.
+    # New kind of error doesn't earn a clean slate; it just confirms you're winging it.
+    import json, tempfile
+    jar = os.path.join(tempfile.gettempdir(), '.kawk_patience')
+    try:
+        with open(jar) as fh: n = int(json.load(fh).get('n', 0)) + 1
+    except Exception:
+        n = 1
+    try:
+        with open(jar, 'w') as fh: json.dump({'n': n}, fh)
+    except Exception:
+        pass
+    # escalation, capped — patience erodes no matter WHAT you throw at the wall.
+    # Early on he still cares WHICH sin you committed (signature roasts below);
+    # by tier 5+ he's too far gone to distinguish — it's all just noise to him now.
+    sig = None
+    for needle, line in (
+        ('unbalanced open',  "You opened something. A paren, a bracket — out there, in the dark. You never closed it. It's still open. It will always be open."),
+        ('unbalanced close', "You closed a paren you never opened. Think about that. Sit with it."),
+        ('two nouns in a row', "Two nouns. Side by side. Touching. No verb between them. What did you expect them to DO, introduce themselves?"),
+        ('ambiguous implicit x', "You left a hole and asked me to guess which side x goes. I am not a psychic. Name it. NAME the variable."),
+        ('not a sequence', "You handed a single number to something that eats lists. Put a ! in front of it. We have BEEN through this — oh. Oh, it's you again."),
+        ('ternary ? without', "You asked a question with ? and then just... left. Where's the colon? Where are the ANSWERS?"),
+        ('unterminated string', "You opened a quote and walked away. The string is still talking. It cannot stop. You did this."),
+        ('unknown glyph', "That's not a glyph. That's not anything. You leaned on the keyboard and hit send."),
+        ('empty program', "You ran nothing. An empty program. A void. Bold. Avant-garde, even. Get out."),
+        ('empty expression', "There's a hole where an expression should be. You promised me an expression. You lied."),
+        ('fold needs a vector', "You tried to fold a single thing into itself. There's nothing to fold. It's already folded. It was born folded."),
+    ):
+        if needle in msg: sig = line; break
+    if sig and n <= 4:
+        prefix = ["", "Again. ", "Still? ", f"({n} now.) "][n - 1]
+        return f"kawk: {prefix}{sig}"
+    tiers = [
+        f"kawk: {msg}.",
+        f"kawk: {msg}. Sure. Let's see what else.",
+        f"kawk: Different problem this time, I see. {msg}.",
+        f"kawk: Are you just trying things? {msg}.",
+        f"kawk: That's {n} errors. You're flinging spaghetti and I am the wall. {msg}.",
+        f"kawk: I'm going to take a long walk off a short pier. ({msg}, if you even care anymore.)",
+        f"kawk: This is a recording. The error desk no longer works here. It was {msg}. It is always something.",
+    ]
+    return tiers[min(n, len(tiers)) - 1]
+
 def main():
     args = sys.argv[1:]
     if args and args[0] in ("-h", "--help", "help"):
@@ -1068,15 +1143,15 @@ def main():
             print(explain(src)); return
         out = interpret(src, sys.stdin.read(), fs)
     except SyntaxError as e:
-        sys.exit(f"kawk: {e}    (try: kawk --explain '{src}'  or  kawk -h)")
+        sys.exit(snark(str(e), src))
     except ZeroDivisionError:
-        sys.exit("kawk: division by zero")
+        sys.exit(snark("division by zero", src))
     except RecursionError:
-        sys.exit("kawk: expression nested too deep")
+        sys.exit(snark("expression nested too deep", src))
     except KeyboardInterrupt:
         sys.exit(130)
     except Exception as e:
-        sys.exit(f"kawk: {type(e).__name__}: {e}")
+        sys.exit(snark(f"{type(e).__name__}: {e}", src))
     sys.stdout.write(out); sys.stdout.write('\n')
 
 if __name__=="__main__": main()

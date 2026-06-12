@@ -29,7 +29,34 @@ t() {
   fi
 }
 
-echo "== scalars & control =="
+# noleak: a bad program must fail with a clean "kawk:" message and NObody
+# Python exception class leaking through. Guards against regressions in the
+# adversarial-hardening pass (trailing operators, div0, huge ints, etc).
+noleak() {
+  name="$1"; prog="$2"
+  err=$(printf '5\n' | $KAWK -e "$prog" 2>&1 | head -1)
+  case "$err" in
+    *Error:*|*"index out of range"*|*"domain error"*|*"Exceeds the limit"*|*"NoneType"*|*"not subscriptable"*|*"unsupported operand"*)
+      fail=$((fail+1)); printf 'FAIL   %s  (python leaked: %s)\n' "$name" "$err" ;;
+    kawk:*)
+      pass=$((pass+1)); printf '  ok   %s\n' "$name" ;;
+    *)
+      fail=$((fail+1)); printf 'FAIL   %s  (no clean error: %s)\n' "$name" "$err" ;;
+  esac
+}
+
+echo "== robustness (no python leaks) =="
+noleak "bare-bang"      '!'
+noleak "bare-caret"     '$0:^'
+noleak "trailing-fold"  '$0:+/'
+noleak "trailing-gather" '$0:$@'
+noleak "div-zero"       '$0:1/0'
+noleak "mod-zero"       '$0:1%0'
+noleak "sqrt-neg"       '$0:.s-9'
+noleak "huge-power"     '$0:5^999999'
+noleak "two-nouns"      '$0 $0'
+noleak "unbalanced"     '(('
+
 t "add"            '$0:2+3'              'x'        '5'
 t "rtl-no-prec"    '$0:2*3+4'            'x'        '14'      # 2*(3+4)
 t "paren-group"    '$0:(2*3)+4'          'x'        '10'
@@ -270,6 +297,9 @@ t "sort-alpha"     '$0:$@<$'           'cat ant bee'  'ant bee cat'  # text sort
 t "sort-desc"      '$0:$@>$'           '5 3 8 1'    '8 5 3 1'    # > = descending
 t "gather"         '$0:$@3,1'          'a b c d'    'c a'        # @ with a vector gathers
 t "negate"         '$0:-$'             '3 -1 4'     '-3 1 -4'    # monadic - negates
+t "distinct"       '$0:=$'             'b a b c a'  'b a c'  # = distinct, first-occurrence order
+t "distinct-count" '$0:#=$'            'x y x z y'  '3'      # #= : how many distinct
+t "all-distinct"   '$0:(#$)=#=$'       '1 2 1'      '0'      # count vs distinct-count
 
 echo "== comments (# at line start) =="
 t "comment-line"   '# sum 1..n
