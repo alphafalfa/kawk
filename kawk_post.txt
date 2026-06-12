@@ -1,0 +1,5 @@
+# [kawk](https://github.com/alphafalfa/kawk), 17 bytes
+
+    a:"Hello, World!"
+
+kawk — a tiny, readable array language. K's operators, AWK's data model, numbers and text treated alike. 

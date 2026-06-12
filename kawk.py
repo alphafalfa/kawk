@@ -767,6 +767,8 @@ class Interp:
         s = fmt_scalar(arg)
         if c == 'u': return s.upper()
         if c == 'l': return s.lower()
+        if c == 'o': return ord(s[0]) if s else 0          # ord: first char -> codepoint
+        if c == 'h': return chr(int(num(arg)))             # chr: codepoint -> char
         raise SyntaxError(f".{c} not supported")
 
     def transpose(self, m):
@@ -999,7 +1001,7 @@ GLYPHS = {
     '\\':("{c}{s}\\seed : while-scan (trajectory)","",                                     "{x>1}{x%2?1+3*x:x/2}\\6"),
     ';': ("a;b : run statements left-to-right",    "",                                     ";: opens the END block (runs once at EOF)"),
 }
-DOTS = "  .u .l upper/lower   .j implode   .f .c .r floor/ceil/round   .a .s abs/sqrt"
+DOTS = "  .u .l upper/lower   .j implode   .f .c .r floor/ceil/round   .a .s abs/sqrt   .o .h ord/chr"
 SPECIALS = "  N = NF (field count)   R = NR (record number)   F = FS   O = OFS"
 ADVERBS  = "  /  fold      '  each/map      \\  scan/while      ;:  END block"
 
